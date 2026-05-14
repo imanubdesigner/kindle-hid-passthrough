@@ -215,5 +215,8 @@ class DaemonController:
                     await host.connection.disconnect()
                 else:
                     logger.info("No active connection to disconnect")
+                # Force daemon.run() to loop back and re-read devices.conf.
+                if self.daemon._host_task and not self.daemon._host_task.done():
+                    self.daemon._host_task.cancel()
             except Exception as e:
                 logger.error(f"Disconnect failed: {e}")

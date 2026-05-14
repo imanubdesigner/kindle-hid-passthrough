@@ -46,7 +46,6 @@ from bumble.transport import open_transport
 from config import Protocol, config, get_fallback_hid_descriptor, get_version, normalize_addr
 from device_cache import DeviceCache
 from logging_utils import log
-from bt_setup import prepare_bt
 from uhid_handler import Bus, UHIDDevice, strip_digitizer_collections
 
 __all__ = ['HIDHost']
@@ -142,6 +141,10 @@ class HIDHost:
         self.hid_host = None  # For Classic
         self.connected_protocol = None
 
+        # Connection-handler tasks; cleanup() cancels them so they don't
+        # run past teardown and dereference torn-down state.
+        self._connection_tasks: set = set()
+
         # Device state
         self.current_device_address = None
         self.device_name = None
@@ -184,14 +187,6 @@ class HIDHost:
     async def start(self):
         """Initialize the Bumble device with both protocols."""
         log.info(f"HID Host v{get_version()}")
-
-        # Ensure BT hardware is available
-        prepare_bt(
-            transport_spec=self.transport_spec,
-            module_patterns=config.bt_module_patterns,
-            kill_processes=config.bt_kill_processes,
-            settle_time=config.bt_settle_time,
-        )
 
         log.info("Opening transport...")
 
@@ -943,11 +938,14 @@ class HIDHost:
 
         def on_connection_event(connection):
             # Only handle Classic connections here
-            if hasattr(connection, 'transport') and connection.transport == BT_BR_EDR_TRANSPORT:
-                asyncio.create_task(on_classic_connection(connection))
-            elif not hasattr(connection, 'transport'):
-                # Assume Classic if no transport attribute (older Bumble)
-                asyncio.create_task(on_classic_connection(connection))
+            is_classic = (hasattr(connection, 'transport')
+                          and connection.transport == BT_BR_EDR_TRANSPORT) \
+                          or not hasattr(connection, 'transport')
+            if not is_classic:
+                return
+            task = asyncio.create_task(on_classic_connection(connection))
+            self._connection_tasks.add(task)
+            task.add_done_callback(self._connection_tasks.discard)
 
         # Store reference so we can remove it on handler restart
         self._classic_connection_listener = on_connection_event
@@ -1488,6 +1486,18 @@ class HIDHost:
 
     async def cleanup(self):
         """Clean up resources."""
+        # Cancel connection handlers before nulling shared state below.
+        if self._connection_tasks:
+            pending = list(self._connection_tasks)
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+            try:
+                await asyncio.gather(*pending, return_exceptions=True)
+            except Exception:
+                pass
+            self._connection_tasks.clear()
+
         if self.uhid_device:
             try:
                 self.uhid_device.destroy()

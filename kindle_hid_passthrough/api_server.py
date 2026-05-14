@@ -180,12 +180,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         result = config.remove_device(address)
         if result["removed"]:
-            # Disconnect if the removed device is currently connected
-            controller = self._controller
-            conn = controller.daemon.connection_state
-            if conn.get("connected") and conn.get("address") == normalize_addr(address):
-                controller.request_disconnect()
-            # Clear descriptor cache for this device
+            self._controller.request_disconnect()
             DeviceCache(config.cache_dir).clear(normalize_addr(address))
             self._send_json({
                 "ok": True,
